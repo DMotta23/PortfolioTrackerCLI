@@ -1,4 +1,4 @@
-#Author: Diogo Terra Simões da Motta - 2nd Year BIE
+#Author: Diogo Terra Simões da Motta, Alexandre Liaudet - 2nd Year BIE
 #Course: Programming for Economists II
 import yfinance as yf
 import matplotlib.pyplot as plt
