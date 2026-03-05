@@ -107,8 +107,9 @@ def print_menu():
     print("0) Exit")
 
 
-
-
+# ---------------------------
+# DASHBOARD
+# ---------------------------
 def open_dashboard():
     """
     Launches the Streamlit dashboard from this project folder.

@@ -1,4 +1,4 @@
-#### Authors: Diogo Motta, Lukas Kuttler, Tristan Stern, Alexandre Liaudet, Nicholas Von Baron, Josef Rupp 
+#### Authors: Diogo Motta, Lukas Kuttler, Tristan Stern, Alexandre Liaudet, Nicholas Von Baron, Josef Rupp.
 #### Course: Programming for Economists II - 2nd Year - Bachelor in Economics
 
 ---
