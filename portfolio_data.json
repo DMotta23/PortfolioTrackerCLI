@@ -1,0 +1,25 @@
+{
+    "portfolio": {
+        "AAPL": {
+            "shares": 10.0,
+            "avg_cost": 240.0,
+            "currency": "USD"
+        },
+        "PETR4.SA": {
+            "shares": 30.0,
+            "avg_cost": 25.0,
+            "currency": "BRL"
+        },
+        "NVDA": {
+            "shares": 15.0,
+            "avg_cost": 170.0,
+            "currency": "USD"
+        },
+        "META": {
+            "shares": 5.0,
+            "avg_cost": 640.0,
+            "currency": "USD"
+        }
+    },
+    "base_currency": "USD"
+}

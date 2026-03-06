@@ -9,6 +9,109 @@ import sys
 
 
 # ---------------------------
+# BASE CURRENCY + FX HELPERS
+# ---------------------------
+BASE_CURRENCY = "EUR"  # change to "USD" if you prefer
+
+
+def fetch_last_close(ticker, period="5d"):
+    """
+    Fetches the last close for a ticker (also works for FX tickers like EURUSD=X).
+    :param ticker: string
+    :param period: yfinance period string
+    :return: float or None
+    """
+    try:
+        hist = yf.Ticker(ticker).history(period=period)
+        if hist.empty:
+            return None
+        return float(hist["Close"].iloc[-1])
+    except Exception:
+        return None
+
+
+def get_fx_rate(from_cur, to_cur):
+    """
+    Returns FX rate for converting from_cur -> to_cur.
+    Example: EUR->USD returns USD per 1 EUR.
+    :param from_cur: string currency code
+    :param to_cur: string currency code
+    :return: float or None
+    """
+    if from_cur == to_cur:
+        return 1.0
+
+    # Try direct quote (e.g. EURUSD=X)
+    direct = f"{from_cur}{to_cur}=X"
+    rate = fetch_last_close(direct)
+    if rate is not None:
+        return rate
+
+    # Try inverse (e.g. USDEUR=X), then invert
+    inverse = f"{to_cur}{from_cur}=X"
+    inv = fetch_last_close(inverse)
+    if inv is not None and inv != 0:
+        return 1.0 / inv
+
+    return None
+
+
+def get_fx_rate_with_fallback(from_cur, to_cur, fx_cache):
+    """
+    Uses cache first; if FX fetch fails, asks user manually once per pair.
+    :param from_cur: string
+    :param to_cur: string
+    :param fx_cache: dict cache {(from,to): rate}
+    :return: float or None
+    """
+    if from_cur in (None, "", "N/A"):
+        from_cur = to_cur
+
+    key = (from_cur, to_cur)
+    if key in fx_cache:
+        return fx_cache[key]
+
+    fx = get_fx_rate(from_cur, to_cur)
+    if fx is not None:
+        fx_cache[key] = fx
+        return fx
+
+    print(f"\n⚠️ Could not fetch FX rate for {from_cur}->{to_cur}.")
+    print("You can enter it manually (example: if 1 USD = 0.92 EUR, type 0.92).")
+    while True:
+        val = input(f"Enter FX rate {from_cur}->{to_cur} (or press Enter to skip): ").strip()
+        if val == "":
+            return None
+        try:
+            fx = float(val)
+            if fx <= 0:
+                print("FX rate must be > 0.")
+                continue
+            fx_cache[key] = fx
+            return fx
+        except ValueError:
+            print("Invalid number.")
+
+
+# ---------------------------
+# BASE CURRENCY MENU ACTION (NEW)
+# ---------------------------
+def change_base_currency():
+    """
+    Lets the user change the base currency used for totals/weights.
+    :return: None
+    """
+    global BASE_CURRENCY
+    print(f"\nCurrent base currency: {BASE_CURRENCY}")
+    new_cur = input("Enter new base currency (e.g., EUR, USD, BRL): ").strip().upper()
+    if new_cur == "":
+        print("Base currency cannot be empty.")
+        return
+    BASE_CURRENCY = new_cur
+    print("Base currency set to:", BASE_CURRENCY)
+
+
+# ---------------------------
 # LOADING/SAVING/DELETING FILE (CRUD)
 # ---------------------------
 # this code section was done and integrated using ChatGPT
@@ -18,12 +121,18 @@ def load_data():
     Loads portfolio data from a JSON file (if it exists).
     :return: portfolio dictionary
     """
+    global BASE_CURRENCY  # NEW: we want to restore base currency from file
     if not os.path.exists(DATA_FILE):
         return {} # returns empty dict in case file does not exist
 
     try:
         with open(DATA_FILE, "r") as f: # reading
             data = json.load(f)
+
+            # NEW: restore base currency if saved
+            if "base_currency" in data and data["base_currency"]:
+                BASE_CURRENCY = data["base_currency"]
+
             if "portfolio" in data:
                 return data["portfolio"]
             return {} # empty dict if file exists but is empty
@@ -37,7 +146,7 @@ def save_data(portfolio):
     :param portfolio: dictionary of holdings
     :return: None
     """
-    data = {"portfolio": portfolio}
+    data = {"portfolio": portfolio, "base_currency": BASE_CURRENCY}  # NEW: save base currency too
     try:
         with open(DATA_FILE, "w") as f: # writing
             json.dump(data, f, indent=4) # indent improves readability
@@ -104,6 +213,7 @@ def print_menu():
     print("5) Trendline price chart (multiple timeframes)")
     print("6) Delete saved data")
     print("7) Open dashboard")
+    print("8) Change base currency")  # NEW
     print("0) Exit")
 
 
@@ -533,11 +643,6 @@ def portfolio_summary(portfolio):
 
     tickers = list(portfolio.keys())
 
-    # easier way of extracting tickers from portfolio dict
-    # tickers = []
-    # for t in portfolio:
-    #     tickers.append(t)
-
 # currency code below done with ChatGPT to identify different
     currencies = set() # similar to lists, but no duplicated are allowed
     for t in portfolio:
@@ -546,14 +651,16 @@ def portfolio_summary(portfolio):
             currencies.add(cur)
     if len(currencies) > 1: # means that there's more than one currency
         print("\n⚠️ Warning: Portfolio contains multiple currencies:", ", ".join(sorted(currencies))) # sorts currencies into alphabetical order and joins each element into one string
-        print("Totals may not be directly comparable without FX conversion.\n")
+        print(f"Converting totals/weights to base currency: {BASE_CURRENCY}\n")
 
     prices = fetch_prices(tickers)
     prices = manual_fix_prices(prices) # just in case yahoo finance cannot get stock price
 
-    total_value = 0.0
-    total_cost = 0.0
-    total_unreal = 0.0
+    fx_cache = {}
+
+    total_value_base = 0.0
+    total_cost_base = 0.0
+    total_unreal_base = 0.0
     rows = []
 
     for t in tickers:
@@ -562,64 +669,74 @@ def portfolio_summary(portfolio):
         price = prices[t]
         currency = portfolio[t].get("currency", "N/A")
 
-        value = shares * price # total stock value
-        cost = shares * avg_cost # total stock cost
-        unreal = (price - avg_cost) * shares # total stock P/L
+        value_local = shares * price # total stock value
+        cost_local = shares * avg_cost # total stock cost
+        unreal_local = (price - avg_cost) * shares # total stock P/L
 
-        # unrealized % for each position
+        # unrealized % for each position (local)
         if avg_cost > 0:
             unreal_pct = ((price - avg_cost) / avg_cost) * 100
         else:
             unreal_pct = 0.0
 
-        total_value += value
-        total_cost += cost
-        total_unreal += unreal
+        fx = get_fx_rate_with_fallback(currency, BASE_CURRENCY, fx_cache)
+        if fx is None:
+            print(f"⚠️ Skipping {t} in totals/weights (missing FX {currency}->{BASE_CURRENCY}).")
+            continue
 
-        rows.append([t, currency, shares, avg_cost, price, value, unreal, unreal_pct])
+        value_base = value_local * fx
+        cost_base = cost_local * fx
+        unreal_base = unreal_local * fx
 
-    # total unrealized % (based on total cost)
-    if total_cost > 0:
-        total_unreal_pct = (total_unreal / total_cost) * 100
+        total_value_base += value_base
+        total_cost_base += cost_base
+        total_unreal_base += unreal_base
+
+        rows.append([t, currency, shares, avg_cost, price, value_local, unreal_local, unreal_pct, value_base, unreal_base])
+
+    # total unrealized % (based on total cost in base currency)
+    if total_cost_base > 0:
+        total_unreal_pct_base = (total_unreal_base / total_cost_base) * 100
     else:
-        total_unreal_pct = 0.0
+        total_unreal_pct_base = 0.0
 
     print("\n===== PORTFOLIO SUMMARY =====")
-    print(f"Total value: {total_value:.2f}")
-    print(f"Total cost: {total_cost:.2f}")
-    print(f"Total unrealized P/L: {total_unreal:.2f} ({total_unreal_pct:.2f}%)\n")
+    print(f"Base currency: {BASE_CURRENCY}")
+    print(f"Total value: {total_value_base:.2f} {BASE_CURRENCY}")
+    print(f"Total cost: {total_cost_base:.2f} {BASE_CURRENCY}")
+    print(f"Total unrealized P/L: {total_unreal_base:.2f} {BASE_CURRENCY} ({total_unreal_pct_base:.2f}%)\n")
 
-    print(f"{'Ticker':<10} {'Curr':<6} {'Shares':>10} {'AvgCost':>10} {'Price':>10} {'Value':>12}"
-          f" {'Unreal P/L':>12} {'Unreal P/L (%)':>14} {'Weight':>8}")
-    print("-" * 120)
+    print(f"{'Ticker':<10} {'Curr':<6} {'Shares':>10} {'AvgCost':>10} {'Price':>10} {'Value(local)':>14}"
+          f" {'Unreal(local)':>14} {'Unr%':>8} {'Value(base)':>14} {'Weight':>8}")
+    print("-" * 135)
 
     best_t = None
-    best_pl = None
+    best_pl_base = None
     worst_t = None
-    worst_pl = None
+    worst_pl_base = None
 
     for r in rows:
-        t, currency, shares, avg_cost, price, value, unreal, unreal_pct = r  # assigning name to each value
+        t, currency, shares, avg_cost, price, value_local, unreal_local, unreal_pct, value_base, unreal_base = r
 
-        if total_value > 0:
-            weight = (value / total_value) * 100
+        if total_value_base > 0:
+            weight = (value_base / total_value_base) * 100
         else:
-            weight = 0 # since if total_value = 0, the program crashes
+            weight = 0
 
-        print(f"{t:<10} {currency:<6} {shares:>10.2f} {avg_cost:>10.2f} {price:>10.2f} {value:>12.2f}"
-              f" {unreal:>12.2f} {unreal_pct:>13.2f}% {weight:>7.2f}%")
+        print(f"{t:<10} {currency:<6} {shares:>10.2f} {avg_cost:>10.2f} {price:>10.2f} {value_local:>14.2f}"
+              f" {unreal_local:>14.2f} {unreal_pct:>7.2f}% {value_base:>14.2f} {weight:>7.2f}%")
 
-        if best_pl is None or unreal > best_pl: # iterating through each ticker and updating best performance
-            best_pl = unreal
+        # compare winners/losers in base currency (this is correct across currencies)
+        if best_pl_base is None or unreal_base > best_pl_base:
+            best_pl_base = unreal_base
             best_t = t
-        if worst_pl is None or unreal < worst_pl: # same but worst performance
-            worst_pl = unreal
+        if worst_pl_base is None or unreal_base < worst_pl_base:
+            worst_pl_base = unreal_base
             worst_t = t
 
-    best_t_currency = portfolio[best_t]["currency"]
-    worst_t_currency = portfolio[worst_t]["currency"]
-    print("\nBiggest winner (unrealized):", best_t, f"{best_pl:.2f} ({best_t_currency})")
-    print("Biggest loser  (unrealized):", worst_t, f"{worst_pl:.2f} ({worst_t_currency})")
+    if best_t is not None and worst_t is not None:
+        print("\nBiggest winner (unrealized):", best_t, f"{best_pl_base:.2f} {BASE_CURRENCY}")
+        print("Biggest loser  (unrealized):", worst_t, f"{worst_pl_base:.2f} {BASE_CURRENCY}")
 
 
 # ---------------------------
@@ -637,19 +754,32 @@ def rebalance_suggestions(portfolio):
 
     tickers = list(portfolio.keys())
 
-    # tickers = []
-    # for t in portfolio:
-    #     tickers.append(t)
-
     prices = fetch_prices(tickers)
     prices = manual_fix_prices(prices)
 
-    total_value = 0.0
-    values = {}
+    fx_cache = {}
+
+    total_value_base = 0.0
+    values_base = {}
+    fx_by_ticker = {}
+
+    # Compute current values in BASE currency
     for t in tickers:
-        v = portfolio[t]["shares"] * prices[t] # total current value of one stock
-        values[t] = v
-        total_value += v
+        currency = portfolio[t].get("currency", "N/A")
+        fx = get_fx_rate_with_fallback(currency, BASE_CURRENCY, fx_cache)
+        if fx is None:
+            print(f"⚠️ Skipping {t} in rebalance (missing FX {currency}->{BASE_CURRENCY}).")
+            continue
+
+        fx_by_ticker[t] = fx
+        v_local = portfolio[t]["shares"] * prices[t]
+        v_base = v_local * fx
+        values_base[t] = v_base
+        total_value_base += v_base
+
+    if total_value_base == 0:
+        print("Could not compute portfolio value in base currency.")
+        return
 
     print("\nEnter target weights in % for each ticker.")
     print("Example: if you want 50%, type 50")
@@ -657,7 +787,8 @@ def rebalance_suggestions(portfolio):
     targets = {}
     total_w = 0.0
 
-    for t in tickers:
+    # Only ask weights for tickers that were successfully converted
+    for t in values_base:
         while True:
             try:
                 w = float(input(f"Target weight for {t} (in %): ").strip())
@@ -679,30 +810,36 @@ def rebalance_suggestions(portfolio):
         targets[t] = (targets[t] / total_w) * 100
 
     print("\n===== REBALANCE SUGGESTIONS =====")
-    print(f"Total portfolio value: {total_value:.2f}")
+    print(f"Base currency: {BASE_CURRENCY}")
+    print(f"Total portfolio value: {total_value_base:.2f} {BASE_CURRENCY}")
     print("Targets normalized to sum to 100%.\n")
 
-    for t in tickers:
-        current_val = values[t] # how much this stock is worth now (total)
-        target_val = (targets[t] / 100) * total_value # how much this stock should be worth (total) in the portfolio
-        gap = target_val - current_val # how much should be bought/sold in total to reach target_val
+    for t in targets:
+        current_val_base = values_base[t]
+        target_val_base = (targets[t] / 100) * total_value_base
+        gap_base = target_val_base - current_val_base
 
-        price = prices[t]
+        price_local = prices[t]
         currency = portfolio[t].get("currency", "")
+        fx = fx_by_ticker[t]
 
-        if gap > 0: # then BUY more to reach desired weight
-            if price > 0:
-                shares_to_buy = gap / price
+        gap_local = gap_base / fx
+
+        if gap_base > 0: # BUY
+            if price_local > 0:
+                shares_to_buy = gap_local / price_local
             else:
-                shares_to_buy = 0 # in case share price fell to 0
-            print(f"{t}: BUY about {gap:.2f} {currency} (about {shares_to_buy:.2f} shares)")
-        elif gap < 0: # then SELL more
-            sell_amount = abs(gap)
-            if price > 0:
-                shares_to_sell = sell_amount / price
+                shares_to_buy = 0
+            print(f"{t}: BUY about {gap_base:.2f} {BASE_CURRENCY} (~{gap_local:.2f} {currency}, about {shares_to_buy:.2f} shares)")
+
+        elif gap_base < 0: # SELL
+            sell_base = abs(gap_base)
+            sell_local = abs(gap_local)
+            if price_local > 0:
+                shares_to_sell = sell_local / price_local
             else:
                 shares_to_sell = 0
-            print(f"{t}: SELL about {sell_amount:.2f} {currency} (about {shares_to_sell:.2f} shares)")
+            print(f"{t}: SELL about {sell_base:.2f} {BASE_CURRENCY} (~{sell_local:.2f} {currency}, about {shares_to_sell:.2f} shares)")
         else:
             print(f"{t}: already on target")
 
@@ -715,7 +852,6 @@ def main():
     Runs the main portfolio manager loop
     :return: None
     """
-    # portfolio = {}
     portfolio = load_data() # loading portfolio from existing file
 
     while True:
@@ -737,6 +873,9 @@ def main():
             portfolio = {} # resetting memory, as without this line, the portfolio would remain in the memory
         elif choice == "7":
             open_dashboard()
+        elif choice == "8":  # NEW
+            change_base_currency()
+            save_data(portfolio)  # NEW: persist base currency
         elif choice == "0":
             print("Goodbye!")
             break
